@@ -72,6 +72,11 @@ input[type=number]:focus{border-color:#7e22ce}
 .ai:focus{border-color:#7e22ce}
 .as{padding:5px 10px;border:none;border-radius:5px;cursor:pointer;font-size:10px;font-weight:700}
 .alog{margin-top:4px;font-size:9px;color:#64748b}.alog b{color:#7e22ce}
+.xl{margin:2px 0 7px 32px;display:flex;gap:5px;align-items:center;flex-wrap:wrap}
+.xi{width:46px;background:#ffffff;border:1px solid #d4d4d8;border-radius:4px;padding:4px 5px;font-size:13px;text-align:center;outline:none;-webkit-appearance:none;color:#18181b}
+.xi:focus{border-color:#a21caf}
+.xs{padding:4px 9px;border:none;border-radius:4px;font-size:9px;font-weight:700;background:#a21caf;color:#fff;cursor:pointer}
+.xlast{font-size:9px;color:#64748b;white-space:nowrap}.xlast b{color:#a21caf}
 .phase{font-size:10px;color:#92400e;text-align:center;padding:6px 10px;background:#fffbeb;border-radius:6px;margin-bottom:10px;border:1px solid #f59e0b33}
 .phase b{color:#18181b}
 /* Floating timer bar */
@@ -202,14 +207,94 @@ let tmb={squat:0,bench:0,deadlift:0,ohp:0};
 let aw=0,ed=null,ct="max",phase=0,cycle=0;
 let amrap={},dn={},dayDn={},subs={};
 let bkOpen=false;
+let ghOpen=false,ghSha=null,pushTimer=null;
+const GH_REPO="drysoup/531",GH_PATH="data.json";
 let plog=[],bmlog=[];
+let accLog={};
 let statLift="squat",bmMetric="weight";
 // Timer
 let tActive=false,tl=0,ttot=0,trun=false,tdone=false,tiv=null,tType="working",tExpanded=false,actx=null;
 
 // ===== PERSIST =====
-function save(){try{localStorage.setItem("531v4",JSON.stringify({mx,md,amrap,dn,dayDn,phase,cycle,tmb,plog,bmlog,aw,ct,subs}))}catch(e){}}
-function load(){try{const d=JSON.parse(localStorage.getItem("531v4"));if(d){mx=d.mx||mx;md=d.md||md;amrap=d.amrap||{};dn=d.dn||{};dayDn=d.dayDn||{};phase=d.phase||0;cycle=d.cycle||0;tmb=Object.assign({squat:0,bench:0,deadlift:0,ohp:0},d.tmb||{});plog=d.plog||[];bmlog=d.bmlog||[];subs=d.subs||{};if(typeof d.aw==="number")aw=d.aw;if(d.ct)ct=d.ct}}catch(e){}}
+function save(){try{localStorage.setItem("531v4",JSON.stringify({mx,md,amrap,dn,dayDn,phase,cycle,tmb,plog,bmlog,aw,ct,subs,accLog,syncedAt:Date.now()}));schedulePush()}catch(e){}}
+function load(){try{const d=JSON.parse(localStorage.getItem("531v4"));if(d){mx=d.mx||mx;md=d.md||md;amrap=d.amrap||{};dn=d.dn||{};dayDn=d.dayDn||{};phase=d.phase||0;cycle=d.cycle||0;tmb=Object.assign({squat:0,bench:0,deadlift:0,ohp:0},d.tmb||{});plog=d.plog||[];bmlog=d.bmlog||[];subs=d.subs||{};accLog=d.accLog||{};if(typeof d.aw==="number")aw=d.aw;if(d.ct)ct=d.ct}}catch(e){}}
+
+// ===== GITHUB CLOUD SYNC =====
+// Stores a copy of your data as data.json in your GitHub repo via the Contents API.
+// The token lives in its own localStorage key (531tok) — kept separate from your
+// workout data (531v4) so it's never included in a text Backup export.
+function b64Enc(str){return btoa(unescape(encodeURIComponent(str)))}
+function b64Dec(str){return decodeURIComponent(escape(atob(str)))}
+function ghTok(){return localStorage.getItem("531tok")||""}
+async function ghFetch(opts){
+opts=opts||{};
+const r=await fetch(`https://api.github.com/repos/${GH_REPO}/contents/${GH_PATH}`,Object.assign({},opts,{headers:Object.assign({"Authorization":"Bearer "+ghTok(),"Accept":"application/vnd.github+json"},opts.headers||{})}));
+return r;
+}
+async function pullFromGH(){
+if(!ghTok())return{ok:true,data:null};
+try{
+const r=await ghFetch();
+if(r.status===404)return{ok:true,data:null};
+if(!r.ok)return{ok:false,error:"HTTP "+r.status+(r.status===401||r.status===403?" — token invalid or missing permission":"")};
+const j=await r.json();
+ghSha=j.sha;
+return{ok:true,data:JSON.parse(b64Dec(j.content.replace(/\n/g,"")))};
+}catch(e){return{ok:false,error:"network error — check your connection"}}
+}
+function schedulePush(){
+if(!ghTok())return;
+clearTimeout(pushTimer);
+pushTimer=setTimeout(()=>pushToGH(false),3000);
+}
+async function pushToGH(isRetry){
+if(!ghTok())return;
+setSyncStatus("syncing","⏳ Syncing…");
+try{
+const payload=localStorage.getItem("531v4")||"{}";
+const body={message:"531 data sync",content:b64Enc(payload)};
+if(ghSha)body.sha=ghSha;
+const r=await ghFetch({method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+if(r.status===409&&!isRetry){await pullFromGH();return pushToGH(true)}
+if(!r.ok){const j=await r.json().catch(()=>({}));throw new Error(j.message||("HTTP "+r.status))}
+const j=await r.json();
+ghSha=j.content.sha;
+setSyncStatus("ok","✅ Synced "+new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}));
+}catch(e){setSyncStatus("error","⚠ Sync failed — "+(e.message||"check connection"))}
+}
+async function initSync(){
+if(!ghTok())return;
+setSyncStatus("syncing","⏳ Checking cloud data…");
+const res=await pullFromGH();
+if(!res.ok){setSyncStatus("error","⚠ Couldn't connect — "+res.error);return}
+const remote=res.data;
+const localRaw=localStorage.getItem("531v4");
+const local=localRaw?JSON.parse(localRaw):{};
+if(remote&&(remote.syncedAt||0)>(local.syncedAt||0)){
+localStorage.setItem("531v4",JSON.stringify(remote));
+load();bT();bM();rP();rS();bL();rFB();
+setSyncStatus("ok","✅ Pulled newer data from GitHub");
+}else{
+setSyncStatus("ok",remote?"✅ Synced":"✅ Connected — will sync on next change");
+if(!remote)schedulePush();
+}
+}
+function setSyncStatus(status,msg){
+const el=document.getElementById("gh-status");
+if(el){el.textContent=msg||"";el.style.color=status==="error"?"#c2410c":status==="syncing"?"#71717a":"#059669"}
+}
+function toggleGh(){ghOpen=!ghOpen;bM()}
+function connectGh(){
+const inp=document.getElementById("gh-tok");
+if(!inp||!inp.value.trim()){setSyncStatus("error","⚠ Paste your token first.");return}
+localStorage.setItem("531tok",inp.value.trim());
+bM();initSync();
+}
+function disconnectGh(){
+if(!confirm("Stop auto-syncing to GitHub? Your local data on this phone stays untouched."))return;
+localStorage.removeItem("531tok");ghSha=null;bM();
+}
+function manualSync(){pushToGH(false)}
 
 // ===== WAKE LOCK (always on) =====
 let wl=null;
@@ -223,6 +308,7 @@ const pc=(tm,p)=>tm?r25(tm*p):"—";
 const e1=(w,r)=>{if(!w||!r||r<1)return 0;return r===1?w:Math.round(w*(1+r/30))};
 const fm=s=>{const m=Math.floor(s/60),sc=s%60;return m+":"+(sc<10?"0":"")+sc};
 const fD=d=>new Date(d).toLocaleDateString("en-GB",{day:"numeric",month:"short"});
+const safeId=s=>s.replace(/[^a-zA-Z0-9]/g,"_");
 
 // ===== AUDIO =====
 function bpk(f,d){try{if(!actx)actx=new(window.AudioContext||window.webkitAudioContext)();const o=actx.createOscillator(),g=actx.createGain();o.connect(g);g.connect(actx.destination);o.frequency.value=f;o.type="sine";g.gain.setValueAtTime(.3,actx.currentTime);g.gain.exponentialRampToValueAtTime(.01,actx.currentTime+d);o.start(actx.currentTime);o.stop(actx.currentTime+d)}catch(e){}}
@@ -339,6 +425,20 @@ function isWkDn(wk){for(const l of L){if(!dayDn[l+"-"+wk])return false}return tr
 // Cycle an accessory exercise to its next equipment alternative (wraps back to original)
 function cycleAlt(key,name){const alts=ALT[name];if(!alts||!alts.length)return;subs[key]=((subs[key]||0)+1)%(alts.length+1);save();rP()}
 
+// ===== ACCESSORY WEIGHT LOG =====
+// Lets you save weight × reps per accessory exercise so you're not relying on memory.
+// Keyed by the exercise's own name (so a swapped variant tracks its own history),
+// and shows/prefills the last logged numbers so you always know what to beat.
+function logAcc(name){
+const sid=safeId(name);
+const wEl=document.getElementById("xw-"+sid),rEl=document.getElementById("xr-"+sid);
+if(!wEl||!rEl)return;
+const w=parseFloat(wEl.value),r=parseInt(rEl.value);
+if(!w||!r)return;
+accLog[name]={w,r,date:new Date().toISOString()};
+save();rP();
+}
+
 // ===== AMRAP =====
 function sA(lift,wk){const inp=document.getElementById("ai-"+lift+"-"+wk);if(!inp)return;const v=parseInt(inp.value);if(!v||v<1)return;amrap[lift+"-"+wk]={reps:v,date:new Date().toISOString()};
 // Log estimated 1RM to progress history
@@ -371,6 +471,19 @@ h+=`<div id="bk-msg" style="font-size:10px;color:#71717a;margin-top:4px;min-heig
 h+=`<div style="margin-top:14px;border-top:1px solid #e4e4e9;padding-top:10px"><label style="font-size:10px;color:#71717a;display:block;margin-bottom:4px">Restore from a saved backup:</label>`;
 h+=`<textarea id="bk-in" style="width:100%;background:#ffffff;border:1px solid #d4d4d8;border-radius:5px;padding:7px 8px;color:#18181b;font-size:11px;font-family:monospace;height:70px;resize:vertical" placeholder="Paste your saved backup text here"></textarea>`;
 h+=`<button class="cb" style="background:linear-gradient(135deg,#c2410c,#c2410ccc)" onclick="importData()">Restore Backup</button></div>`;
+h+=`</div></div>`;
+const connected=!!ghTok();
+h+=`<div class="dc" style="margin-top:8px;${ghOpen?"border-color:#0369a155":""}"><button class="dh" onclick="toggleGh()"><div class="dbr" style="background:#0369a1"></div><div class="di"><div>☁️ Cloud Sync</div><div class="ds">${connected?"Auto-saves to your GitHub repo":"Not connected"}</div></div><div class="da${ghOpen?" o":""}">▾</div></button><div class="db${ghOpen?" o":""}">`;
+if(connected){
+h+=`<div class="box" style="margin-top:8px">Every change auto-saves to <b>data.json</b> in your <b>531</b> repo. Your data now survives even a full phone reset or reinstall.</div>`;
+h+=`<div id="gh-status" style="font-size:11px;font-weight:600;margin:6px 0 10px;min-height:16px"></div>`;
+h+=`<div style="display:flex;gap:6px"><button class="cb" style="background:linear-gradient(135deg,#0369a1,#0369a1cc);margin-top:0;flex:1" onclick="manualSync()">Sync Now</button><button class="cb" style="background:#71717a;margin-top:0;flex:1" onclick="disconnectGh()">Disconnect</button></div>`;
+}else{
+h+=`<div class="box" style="margin-top:8px">Paste a GitHub token scoped to <b>only</b> your <b>531</b> repo (Contents: Read and write) to turn on automatic cloud backup — no more manual exports.</div>`;
+h+=`<input type="password" id="gh-tok" placeholder="Paste your GitHub token here" style="width:100%;background:#ffffff;border:1px solid #d4d4d8;border-radius:5px;padding:9px 8px;color:#18181b;font-size:14px;margin-bottom:8px">`;
+h+=`<button class="cb" style="background:linear-gradient(135deg,#0369a1,#0369a1cc)" onclick="connectGh()">Connect</button>`;
+h+=`<div id="gh-status" style="font-size:11px;font-weight:600;margin-top:6px;min-height:16px"></div>`;
+}
 h+=`</div></div>`;
 c.innerHTML=h;
 }
@@ -442,7 +555,13 @@ for(let i=0;i<bs;i++){const k=l+"-"+aw+"-"+si;const d=dn[k];bd+=`<div class="ex"
 ACC[l][phase].forEach((sec,secIdx)=>{
 const restLabel={compound:"90-120s",isolation:"60-90s",core:"60s"}[sec.rt]||"60-90s";
 bd+=`<div class="st" style="color:#a21caf">${sec.t} <span class="rh">— ${restLabel}</span></div>`;
-sec.ex.forEach((ex,exIdx)=>{const k=l+"-"+aw+"-"+si;const d=dn[k];const subKey=l+"-"+phase+"-"+secIdx+"-"+exIdx;const ci=ex.indexOf(":"),origName=ex.slice(0,ci),scheme=ex.slice(ci);const alts=ALT[origName]||[];const aIdx=subs[subKey]||0;const shown=(aIdx>0&&aIdx<=alts.length)?alts[aIdx-1]:origName;bd+=`<div class="ex" style="border-left:2px solid #a21caf33"><span class="ck${d?" done":""}" onclick="tgSet('${k}','${l}',${si})">${d?"✓":""}</span><span style="flex:1">${shown}${scheme}${aIdx>0?'<span style="color:#71717a;font-size:9px"> · swapped</span>':""}</span>${alts.length?`<span onclick="cycleAlt('${subKey}','${origName}')" style="cursor:pointer;font-size:14px;color:#71717a;padding:2px 5px;flex-shrink:0" title="Swap exercise">⇄</span>`:""}</div>`;si++});
+sec.ex.forEach((ex,exIdx)=>{const k=l+"-"+aw+"-"+si;const d=dn[k];const subKey=l+"-"+phase+"-"+secIdx+"-"+exIdx;const ci=ex.indexOf(":"),origName=ex.slice(0,ci),scheme=ex.slice(ci);const alts=ALT[origName]||[];const aIdx=subs[subKey]||0;const shown=(aIdx>0&&aIdx<=alts.length)?alts[aIdx-1]:origName;
+bd+=`<div class="ex" style="border-left:2px solid #a21caf33"><span class="ck${d?" done":""}" onclick="tgSet('${k}','${l}',${si})">${d?"✓":""}</span><span style="flex:1">${shown}${scheme}${aIdx>0?'<span style="color:#71717a;font-size:9px"> · swapped</span>':""}</span>${alts.length?`<span onclick="cycleAlt('${subKey}','${origName}')" style="cursor:pointer;font-size:14px;color:#71717a;padding:2px 5px;flex-shrink:0" title="Swap exercise">⇄</span>`:""}</div>`;
+si++;
+// Weight/reps log row for this exercise
+const sid=safeId(shown),last=accLog[shown];
+bd+=`<div class="xl"><input class="xi" type=number inputmode=decimal id="xw-${sid}" placeholder="kg" value="${last?last.w:""}"><input class="xi" type=number inputmode=numeric id="xr-${sid}" placeholder="reps" value="${last?last.r:""}"><button class="xs" onclick="logAcc('${shown.replace(/'/g,"\\'")}')">Log</button>${last?`<span class="xlast">Last: <b>${last.w}kg×${last.r}</b></span>`:""}</div>`;
+});
 });
 // Day complete
 bd+=`<button style="width:100%;padding:10px;margin-top:8px;border:1px solid ${mD?"#059669":"#d4d4d8"};border-radius:6px;background:${mD?"#05966922":"transparent"};color:${mD?"#059669":"#71717a"};font-size:11px;font-weight:600;cursor:pointer;font-family:inherit" onclick="tgDay('${l+"-"+aw}')">${mD?"✅ Day Complete!":"Mark Day Complete"}</button>`;
@@ -516,7 +635,7 @@ h+=`</div>`;c.innerHTML=h;
 if('serviceWorker' in navigator){const sw=`self.addEventListener('install',e=>{self.skipWaiting()});self.addEventListener('activate',e=>{e.waitUntil(clients.claim())});self.addEventListener('fetch',e=>{e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(res=>{if(res.status===200){const c=res.clone();caches.open('531v4').then(cache=>cache.put(e.request,c))}return res}).catch(()=>new Response('Offline',{status:503}))))})`;navigator.serviceWorker.register(URL.createObjectURL(new Blob([sw],{type:'application/javascript'}))).catch(()=>{})}
 
 // ===== INIT =====
-load();acquireWL();bT();bM();rP();rS();bL();rFB();sT(ct);
+load();acquireWL();bT();bM();rP();rS();bL();rFB();sT(ct);initSync();
 </script>
 </body>
 </html>
